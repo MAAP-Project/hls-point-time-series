@@ -1,4 +1,4 @@
-"""Create a cloud-free composite image from a temporal mosaic of HLS granules"""
+"""Extract a values from an HLS time series for a set of points in a MGRS tile"""
 
 import argparse
 import asyncio
@@ -13,11 +13,8 @@ from typing import Tuple
 import odc.stac
 import rioxarray  # noqa
 from maap.maap import MAAP
-from odc.geo.geobox import GeoBox
 from odc.stac import ParsedItem
-from pyproj import CRS
-from pystac import Asset, Catalog, CatalogType, Item, MediaType
-from rasterio.warp import transform_bounds
+from pystac import Catalog, CatalogType, Item
 from rio_stac import create_stac_item
 from rustac import DuckdbClient
 
@@ -109,17 +106,16 @@ HLS_ODC_STAC_CONFIG = {
 }
 
 # these are the ones that we are going to use
-DEFAULT_BANDS = ["red", "green", "blue", "nir_narrow", "swir_1", "swir_2"]
+DEFAULT_BANDS = [
+    "red",
+    "green",
+    "blue",
+    "nir_narrow",
+    "swir_1",
+    "swir_2",
+    "Fmask",
+]
 DEFAULT_RESOLUTION = 30
-
-"""
-hls_bitmask:
-hls_mask_bitfields = [1, 2, 3]  # cloud shadow, adjacent to cloud shadow, cloud
-hls_bitmask = 0
-for field in hls_mask_bitfields:
-    hls_bitmask |= 1 << field
-"""
-HLS_BITMASK = 14
 
 
 def parse_datetime_utc(dt_string: str) -> datetime:
@@ -142,36 +138,6 @@ def parse_datetime_utc(dt_string: str) -> datetime:
     return dt
 
 
-def validate_crs_units_in_meters(crs: CRS) -> None:
-    """
-    Validate that the CRS uses meters as its linear unit.
-
-    Args:
-        crs: The CRS to validate
-
-    Raises:
-        ValueError: If the CRS does not use meters as its linear unit
-    """
-    # Get the axis info to check units
-    axis_info = crs.axis_info
-
-    if not axis_info:
-        raise ValueError(
-            f"Cannot determine units for CRS '{crs}'. "
-            "Please provide a CRS with meter units."
-        )
-
-    # Check if any axis uses non-meter units
-    for axis in axis_info:
-        unit_name = axis.unit_name.lower()
-        # Common meter unit names: "metre", "meter", "m"
-        if unit_name not in ["metre", "meter", "m"]:
-            raise ValueError(
-                f"CRS '{crs}' uses '{axis.unit_name}' units, but only CRS with meter units are supported. "
-                f"Please provide a CRS that uses meters (e.g., UTM zones, Web Mercator)."
-            )
-
-
 def group_by_sensor_and_date(
     item: Item,
     parsed: ParsedItem,
@@ -185,7 +151,7 @@ def group_by_sensor_and_date(
 
 
 def get_stac_items(
-    bbox: BBox, start_datetime: datetime, end_datetime: datetime, crs: CRS
+    mgrs_tile: str, start_datetime: datetime, end_datetime: datetime
 ) -> list[Item]:
     logger.info("querying HLS archive")
     client = DuckdbClient(use_hive_partitioning=True)
@@ -203,14 +169,7 @@ def get_stac_items(
         items = client.search(
             href=HLS_STAC_GEOPARQUET_HREF.format(collection=collection),
             datetime="/".join(dt.isoformat() for dt in [start_datetime, end_datetime]),
-            bbox=transform_bounds(
-                src_crs=crs,
-                dst_crs="epsg:4326",
-                left=bbox[0],
-                bottom=bbox[1],
-                right=bbox[2],
-                top=bbox[3],
-            ),
+            filter={"op": "like", "args": [{"property": "id"}, f"%.{mgrs_tile}.%"]},
         )
 
     logger.info(f"found {len(items)} items")
@@ -219,20 +178,18 @@ def get_stac_items(
 
 
 async def run(
+    mgrs_tile: str,
     start_datetime: datetime,
     end_datetime: datetime,
-    bbox: BBox,
-    crs: CRS,
     output_dir: Path,
     bands: list[str] = DEFAULT_BANDS,
     resolution: int | float = DEFAULT_RESOLUTION,
     direct_bucket_access: bool = False,
 ):
     items = get_stac_items(
-        bbox=bbox,
+        mgrs_tile=mgrs_tile,
         start_datetime=start_datetime,
         end_datetime=end_datetime,
-        crs=crs,
     )
 
     if direct_bucket_access:
@@ -261,39 +218,7 @@ async def run(
         bands=list(set(bands + ["Fmask"])),
         chunks={"x": 512, "y": 512},
         groupby=group_by_sensor_and_date,
-        geobox=GeoBox.from_bbox(bbox=bbox, crs=crs, resolution=resolution, tight=True),
     ).sortby("time")
-
-    mask = stack["Fmask"] & HLS_BITMASK
-
-    cloud_free = stack[bands].where(mask == 0).where(stack != NODATA)
-
-    logger.info("computing median values")
-    composite = cloud_free.median(dim="time", skipna=True).fillna(NODATA).compute()
-
-    assets = {}
-    for band in bands:
-        href = f"{band}.tif"
-        logger.info(f"exporting {href}")
-        da = composite[band]
-        da.rio.set_nodata(NODATA, inplace=True)
-        da_to_export = da.rio.write_nodata(NODATA, encoded=True, inplace=False)
-
-        output_file_path = output_dir / href
-
-        da_to_export.rio.to_raster(
-            output_file_path,
-            driver="COG",
-            dtype=DTYPE,
-            compress="DEFLATE",
-        )
-
-        assets[band] = Asset(
-            href=href,
-            description=f"median {band} band value from cloud-free pixels in the temporal mosaic",
-            media_type=MediaType.COG,
-            roles=["data"],
-        )
 
     catalog = Catalog(
         id="DPS",
@@ -338,7 +263,7 @@ async def run(
 
 if __name__ == "__main__":
     parse = argparse.ArgumentParser(
-        description="Queries the HLS STAC geoparquet archive and writes the result to a file"
+        description="Queries the HLS STAC geoparquet archive and extracts the raster values for a set of points"
     )
     parse.add_argument(
         "--start_datetime",
@@ -353,16 +278,8 @@ if __name__ == "__main__":
         type=str,
     )
     parse.add_argument(
-        "--bbox",
-        help="bounding box (xmin, ymin, xmax, ymax)",
-        required=True,
-        nargs=4,
-        type=float,
-        metavar=("xmin", "ymin", "xmax", "ymax"),
-    )
-    parse.add_argument(
-        "--crs",
-        help="CRS definition of the bounding box coordinates",
+        "--mgrs_tile",
+        help="MGRS tile id, e.g. 15XYZ",
         required=True,
         type=str,
     )
@@ -378,9 +295,6 @@ if __name__ == "__main__":
     args = parse.parse_args()
 
     output_dir = Path(args.output_dir)
-    bbox = tuple(args.bbox)
-    crs = CRS.from_string(args.crs)
-    validate_crs_units_in_meters(crs)
     start_datetime = parse_datetime_utc(args.start_datetime)
     end_datetime = parse_datetime_utc(args.end_datetime)
 
@@ -390,7 +304,7 @@ if __name__ == "__main__":
     os.environ.update(GDAL_CONFIG)
 
     logging.info(
-        f"running with start_datetime: {start_datetime}, end_datetime: {end_datetime}, bbox: {bbox}, crs: {crs}, output_dir: {output_dir}"
+        f"running with mgrs_tile: {args.mgrs_tile}, start_datetime: {start_datetime}, end_datetime: {end_datetime}"
     )
 
     # Retry loop for handling intermittent failures
@@ -403,8 +317,7 @@ if __name__ == "__main__":
                 run(
                     start_datetime=start_datetime,
                     end_datetime=end_datetime,
-                    bbox=bbox,
-                    crs=crs,
+                    mgrs_tile=args.mgrs_tile,
                     output_dir=output_dir,
                     direct_bucket_access=args.direct_bucket_access,
                 )
