@@ -20,7 +20,7 @@ This DPS algorithm uses [`rustac`](https://github.com/stac-utils/rustac-py) to q
 By using `rustac` + parquet files there is no API between the requester and the actual data!
 
 > [!WARNING]
-> This archive of HLS STAC records is experimental and only contains items through May 2025.
+> This archive of HLS STAC records is experimental and only contains items through October 2025.
 
 ## Usage
 
