@@ -302,8 +302,10 @@ def run(
             )
         },
     )
-
-    item.ext.proj.apply(code=crs)
+    item.ext.add("proj")
+    item.ext.proj.apply(
+        code=crs, bbox=stack.rio.bounds(), geometry=mapping(stack.rio.bounds())
+    )
 
     item.set_self_href(f"{output_dir}/item.json")
 
