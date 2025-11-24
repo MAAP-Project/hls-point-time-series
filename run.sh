@@ -23,17 +23,20 @@ mkdir -p output
 INPUT_DIR=input
 OUTPUT_DIR=output
 
-# Parse positional arguments
-if [[ $# -ne 4 ]]; then
-    echo "Error: Expected 4 arguments, got $#"
-    echo "Usage: $0 <start_datetime> <end_datetime> <bbox_string> <crs>"
+# Parse positional arguments (4 required, 2 optional)
+if [[ $# -lt 4 ]] || [[ $# -gt 6 ]]; then
+    echo "Error: Expected 4-6 arguments, got $#"
+    echo "Usage: $0 <start_datetime> <end_datetime> <mgrs_tile> <points_href> [id_col] [bands]"
+    echo "  bands: space-separated list of band names (e.g., 'red green blue')"
     exit 1
 fi
 
 start_datetime="$1"
 end_datetime="$2"
-bbox="$3"
-crs="$4"
+mgrs_tile="$3"
+points_href="$4"
+id_col="${5:-}"
+bands="${6:-}"
 
 # Call the script using the absolute paths
 # Use the updated environment when calling 'uv run'
@@ -44,10 +47,30 @@ crs="$4"
 unset PROJ_LIB
 unset PROJ_DATA
 
-UV_PROJECT=${basedir} uv run --no-dev ${basedir}/main.py \
-    --start_datetime "${start_datetime}" \
-    --end_datetime "${end_datetime}" \
-    --bbox ${bbox} \
-    --crs "${crs}" \
-    --output_dir="${OUTPUT_DIR}" \
-    --direct_bucket_access
+# Build the command with required arguments
+cmd=(
+    uv run --no-dev "${basedir}/main.py"
+    --start_datetime "${start_datetime}"
+    --end_datetime "${end_datetime}"
+    --mgrs_tile "${mgrs_tile}"
+    --points_href "${points_href}"
+)
+
+# Add optional id_col if provided
+if [[ -n "${id_col}" ]]; then
+    cmd+=(--id_col "${id_col}")
+fi
+
+# Add optional bands if provided
+if [[ -n "${bands}" ]]; then
+    # Split bands on spaces and add each as a separate --bands argument
+    for band in ${bands}; do
+        cmd+=(--bands "${band}")
+    done
+fi
+
+# Add output directory and direct bucket access
+cmd+=(--output_dir="${OUTPUT_DIR}" --direct_bucket_access)
+
+# Execute the command with UV_PROJECT environment variable
+UV_PROJECT="${basedir}" "${cmd[@]}"

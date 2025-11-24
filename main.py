@@ -1,7 +1,6 @@
 """Extract a values from an HLS time series for a set of points in a MGRS tile"""
 
 import argparse
-import asyncio
 import json
 import logging
 import os
@@ -10,13 +9,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Tuple
 
+import geopandas as gpd
 import odc.stac
 import rioxarray  # noqa
 from maap.maap import MAAP
 from odc.stac import ParsedItem
-from pystac import Catalog, CatalogType, Item
-from rio_stac import create_stac_item
+from pystac import Asset, Catalog, CatalogType, Item
+from rasterio.warp import transform_bounds
 from rustac import DuckdbClient
+from shapely.geometry import box, mapping
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -25,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 BBox = Tuple[float, float, float, float]
 
-MEMORY_GB = 8
 GDAL_CONFIG = {
     "CPL_TMPDIR": "/tmp",
     "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": "TIF",
@@ -44,7 +44,7 @@ GDAL_CONFIG = {
 }
 
 HLS_COLLECTIONS = ["HLSL30_2.0", "HLSS30_2.0"]
-HLS_STAC_GEOPARQUET_HREF = "s3://maap-ops-workspace/shared/henrydevseed/hls-stac-geoparquet-v2/{collection}/**/*.parquet"
+HLS_STAC_GEOPARQUET_HREF = "s3://maap-ops-workspace/shared/henrydevseed/hls-stac-geoparquet/v0.2.0/{collection}/**/*.parquet"
 
 URL_PREFIX = "https://data.lpdaac.earthdatacloud.nasa.gov/"
 DTYPE = "int16"
@@ -166,10 +166,27 @@ def get_stac_items(
 
     items = []
     for collection in HLS_COLLECTIONS:
-        items = client.search(
-            href=HLS_STAC_GEOPARQUET_HREF.format(collection=collection),
-            datetime="/".join(dt.isoformat() for dt in [start_datetime, end_datetime]),
-            filter={"op": "like", "args": [{"property": "id"}, f"%.{mgrs_tile}.%"]},
+        items.extend(
+            client.search(
+                href=HLS_STAC_GEOPARQUET_HREF.format(collection=collection),
+                datetime="/".join(
+                    dt.isoformat() for dt in [start_datetime, end_datetime]
+                ),
+                filter={
+                    "op": "and",
+                    "args": [
+                        {
+                            "op": "like",
+                            "args": [{"property": "id"}, f"%.T{mgrs_tile}.%"],
+                        },
+                        {"op": "<=", "args": [{"property": "year"}, end_datetime.year]},
+                        {
+                            "op": ">=",
+                            "args": [{"property": "year"}, start_datetime.year],
+                        },
+                    ],
+                },
+            )
         )
 
     logger.info(f"found {len(items)} items")
@@ -177,20 +194,29 @@ def get_stac_items(
     return [Item.from_dict(item) for item in items]
 
 
-async def run(
+def run(
     mgrs_tile: str,
+    points_href: str,
     start_datetime: datetime,
     end_datetime: datetime,
     output_dir: Path,
+    id_col: str | None = None,
     bands: list[str] = DEFAULT_BANDS,
-    resolution: int | float = DEFAULT_RESOLUTION,
     direct_bucket_access: bool = False,
 ):
+    pts = gpd.read_file(points_href)
+
+    if id_col:
+        pts = pts.set_index(id_col)
+
     items = get_stac_items(
         mgrs_tile=mgrs_tile,
         start_datetime=start_datetime,
         end_datetime=end_datetime,
     )
+    if not items:
+        logger.info(f"no STAC items found for tile id {mgrs_tile}")
+        return
 
     if direct_bucket_access:
         maap = MAAP(maap_host="api.maap-project.org")
@@ -215,10 +241,37 @@ async def run(
     stack = odc.stac.load(
         items,
         stac_cfg=HLS_ODC_STAC_CONFIG,
-        bands=list(set(bands + ["Fmask"])),
+        bands=bands,
         chunks={"x": 512, "y": 512},
         groupby=group_by_sensor_and_date,
-    ).sortby("time")
+    ).assign_coords(item_id=[item.id for item in items])
+
+    crs = items[0].ext.proj.crs_string
+    if not crs:
+        raise ValueError("could not parse crs_string from STAC items")
+
+    stack_extent = box(*stack.rio.bounds())
+
+    # identify points within the MGRS tile extent
+    pts_clipped = gpd.clip(pts.to_crs(crs), mask=stack_extent)
+
+    # get projected coordinates
+    pts_clipped["x"] = pts_clipped.geometry.x
+    pts_clipped["y"] = pts_clipped.geometry.y
+
+    # extract array values at point locations
+    indexer = pts_clipped[["x", "y"]].to_xarray()
+    sample = stack.sel(x=indexer.x, y=indexer.y, method="nearest", tolerance=20)
+
+    # convert array to dataframe
+    sample_df = sample.to_dataframe()
+
+    # identify non-NA rows
+    int16_cols = sample_df[bands].select_dtypes("int16").columns
+    valid = (sample_df[int16_cols] != NODATA).all(axis=1)
+
+    output_parquet = f"{output_dir}/point_sample.parquet"
+    sample_df[valid].to_parquet(output_parquet, compression="zstd")
 
     catalog = Catalog(
         id="DPS",
@@ -226,28 +279,27 @@ async def run(
         catalog_type=CatalogType.SELF_CONTAINED,
     )
 
-    # use one of the output files as a template for rio-stac
-    source_file = f"{output_dir}/{assets[bands[0]].href}"
-
-    item = create_stac_item(
-        source=source_file,
+    item = Item(
         id="-".join(
             [
-                "_".join(str(int(x)) for x in bbox),
+                mgrs_tile,
                 start_datetime.strftime("%Y%m%d"),
                 end_datetime.strftime("%Y%m%d"),
             ]
         ),
-        with_proj=True,
+        bbox=transform_bounds(crs, "epsg:4326", *stack.rio.bounds()),
+        geometry=mapping(stack_extent),
+        datetime=end_datetime,
         properties={
-            "datetime": end_datetime.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "start_datetime": start_datetime.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "end_datetime": end_datetime.strftime("%Y-%m-%dT%H:%M:%SZ"),
         },
+        assets={
+            "parquet": Asset(
+                href=output_parquet, title="point sample values", description="HLS "
+            )
+        },
     )
-
-    # replace auto-generated assets with our own
-    item.assets = assets
 
     item.set_self_href(f"{output_dir}/item.json")
 
@@ -284,6 +336,25 @@ if __name__ == "__main__":
         type=str,
     )
     parse.add_argument(
+        "--points_href",
+        help="href for spatial points file (must have crs defined)",
+        required=True,
+        type=str,
+    )
+    parse.add_argument(
+        "--id_col",
+        help="column name to use to identify points in output dataframe",
+        required=False,
+        type=str,
+    )
+    parse.add_argument(
+        "--bands",
+        help="bands to extract (can be specified multiple times). Default: red, green, blue, nir_narrow, swir_1, swir_2, Fmask",
+        required=False,
+        action="append",
+        type=str,
+    )
+    parse.add_argument(
         "--output_dir", help="Directory in which to save output", required=True
     )
     parse.add_argument(
@@ -313,14 +384,15 @@ if __name__ == "__main__":
 
     for attempt in range(max_retries):
         try:
-            asyncio.run(
-                run(
-                    start_datetime=start_datetime,
-                    end_datetime=end_datetime,
-                    mgrs_tile=args.mgrs_tile,
-                    output_dir=output_dir,
-                    direct_bucket_access=args.direct_bucket_access,
-                )
+            run(
+                start_datetime=start_datetime,
+                end_datetime=end_datetime,
+                mgrs_tile=args.mgrs_tile,
+                points_href=args.points_href,
+                id_col=args.id_col,
+                bands=args.bands if args.bands else DEFAULT_BANDS,
+                output_dir=output_dir,
+                direct_bucket_access=args.direct_bucket_access,
             )
             logging.info("Successfully completed processing")
             break
