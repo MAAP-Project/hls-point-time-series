@@ -1,6 +1,6 @@
 algorithm_description: Extract HLS time series values for spatial points using STAC Geoparquet
 algorithm_name: HLS Point Time Series Extraction
-algorithm_version: v0.1.0
+algorithm_version: v0.1
 build_command: hls-point-time-series/build-env.sh
 disk_space: 8GB
 docker_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0
