@@ -1,0 +1,38 @@
+algorithm_description: Extract HLS time series values for spatial points using STAC Geoparquet
+algorithm_name: HLS Point Time Series Extraction
+algorithm_version: v0.1.0
+build_command: hls-point-time-series/build-env.sh
+disk_space: 8GB
+docker_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0
+inputs:
+  config: []
+  file: []
+  positional:
+  - default: ''
+    description: start datetime for HLS STAC query in YYYY-mm-ddTHH:MM:SSZ format
+    name: start_datetime
+    required: true
+  - default: ''
+    description: end datetime for HLS STAC query in YYYY-mm-ddTHH:MM:SSZ format
+    name: end_datetime
+    required: true
+  - default: ''
+    description: MGRS tile identifier (e.g. 15TYK)
+    name: mgrs_tile
+    required: true
+  - default: ''
+    description: URL to spatial points file (GeoJSON, GeoParquet, Shapefile, etc.)
+    name: points_href
+    required: true
+  - default: ''
+    description: optional column name to use as index for points in output dataframe
+    name: id_col
+    required: false
+  - default: ''
+    description: optional space-separated list of band names (e.g. "red green blue Fmask")
+    name: bands
+    required: false
+queue: maap-dps-worker-16gb
+repository_url: https://github.com/MAAP-Project/hls-point-time-series
+run_command: hls-point-time-series/run.sh
+
