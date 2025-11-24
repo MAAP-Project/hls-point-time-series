@@ -304,7 +304,7 @@ def run(
     )
     item.ext.add("proj")
     item.ext.proj.apply(
-        code=crs, bbox=stack.rio.bounds(), geometry=mapping(stack.rio.bounds())
+        code=crs, bbox=stack.rio.bounds(), geometry=mapping(box(*stack.rio.bounds()))
     )
 
     item.set_self_href(f"{output_dir}/item.json")
