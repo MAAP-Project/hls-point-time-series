@@ -6,7 +6,11 @@ disk_space: 8GB
 docker_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0
 inputs:
   config: []
-  file: []
+  file:
+  - default: ''
+    description: input file to transform
+    name: input_file
+    required: false
   positional:
   - default: ''
     description: start datetime for HLS STAC query in YYYY-mm-ddTHH:MM:SSZ format
@@ -19,10 +23,6 @@ inputs:
   - default: ''
     description: MGRS tile identifier (e.g. 15TYK)
     name: mgrs_tile
-    required: true
-  - default: ''
-    description: URL to spatial points file (GeoJSON, GeoParquet, Shapefile, etc.)
-    name: points_href
     required: true
   - default: ''
     description: optional column name to use as index for points in output dataframe

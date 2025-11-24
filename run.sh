@@ -23,10 +23,12 @@ mkdir -p output
 INPUT_DIR=input
 OUTPUT_DIR=output
 
-# Parse positional arguments (4 required, 2 optional)
-if [[ $# -lt 4 ]] || [[ $# -gt 6 ]]; then
+input_filename=$(ls -d input/*)
+
+# Parse positional arguments (3 required, 2 optional)
+if [[ $# -lt 3 ]] || [[ $# -gt 5 ]]; then
     echo "Error: Expected 4-6 arguments, got $#"
-    echo "Usage: $0 <start_datetime> <end_datetime> <mgrs_tile> <points_href> [id_col] [bands]"
+    echo "Usage: $0 <start_datetime> <end_datetime> <mgrs_tile> [id_col] [bands]"
     echo "  bands: space-separated list of band names (e.g., 'red green blue')"
     exit 1
 fi
@@ -34,9 +36,8 @@ fi
 start_datetime="$1"
 end_datetime="$2"
 mgrs_tile="$3"
-points_href="$4"
-id_col="${5:-}"
-bands="${6:-}"
+id_col="${4:-}"
+bands="${5:-}"
 
 # Call the script using the absolute paths
 # Use the updated environment when calling 'uv run'
@@ -53,7 +54,7 @@ cmd=(
     --start_datetime "${start_datetime}"
     --end_datetime "${end_datetime}"
     --mgrs_tile "${mgrs_tile}"
-    --points_href "${points_href}"
+    --points_href "${input_filename}"
 )
 
 # Add optional id_col if provided
