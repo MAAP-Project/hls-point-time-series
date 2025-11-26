@@ -11,6 +11,7 @@ from typing import Tuple
 
 import geopandas as gpd
 import odc.stac
+import pandas as pd
 import rioxarray  # noqa
 from maap.maap import MAAP
 from odc.stac import ParsedItem
@@ -179,10 +180,13 @@ def get_stac_items(
                             "op": "like",
                             "args": [{"property": "id"}, f"%.T{mgrs_tile}.%"],
                         },
-                        {"op": "<=", "args": [{"property": "year"}, end_datetime.year]},
                         {
-                            "op": ">=",
-                            "args": [{"property": "year"}, start_datetime.year],
+                            "op": "between",
+                            "args": [
+                                {"property": "year"},
+                                start_datetime.year,
+                                end_datetime.year,
+                            ],
                         },
                     ],
                 },
@@ -203,6 +207,7 @@ def run(
     id_col: str | None = None,
     bands: list[str] = DEFAULT_BANDS,
     direct_bucket_access: bool = False,
+    batch_size: int = 20,
 ):
     pts = gpd.read_file(points_href)
 
@@ -238,13 +243,17 @@ def run(
                     asset.href = asset.href.replace(URL_PREFIX, "s3://")
 
     logger.info("loading into xarray via odc.stac")
-    stack = odc.stac.load(
-        items,
-        stac_cfg=HLS_ODC_STAC_CONFIG,
-        bands=bands,
-        chunks={"x": 512, "y": 512},
-        groupby=group_by_sensor_and_date,
-    ).assign_coords(item_id=[item.id for item in items])
+    stack = (
+        odc.stac.load(
+            items,
+            stac_cfg=HLS_ODC_STAC_CONFIG,
+            bands=bands,
+            chunks={"x": 512, "y": 512},
+            groupby=group_by_sensor_and_date,
+        )
+        .assign_coords(item_id=[item.id for item in items])
+        .sortby("time")
+    )
 
     crs = items[0].ext.proj.crs_string
     if not crs:
@@ -259,19 +268,62 @@ def run(
     pts_clipped["x"] = pts_clipped.geometry.x
     pts_clipped["y"] = pts_clipped.geometry.y
 
-    # extract array values at point locations
+    # get the indexer for point locations
     indexer = pts_clipped[["x", "y"]].to_xarray()
-    sample = stack.sel(x=indexer.x, y=indexer.y, method="nearest", tolerance=20)
 
-    # convert array to dataframe
-    sample_df = sample.to_dataframe()
+    # get time dimension size
+    time_dim = stack.dims["time"]
+    logger.info(f"processing {time_dim} time steps in batches of {batch_size}")
 
-    # identify non-NA rows
-    int16_cols = sample_df[bands].select_dtypes("int16").columns
-    valid = (sample_df[int16_cols] != NODATA).all(axis=1)
+    # process time dimension in batches with retry logic
+    batch_dfs = []
+    max_retries = 3
+    retry_delay = 5  # seconds
+
+    for batch_start in range(0, time_dim, batch_size):
+        batch_end = min(batch_start + batch_size, time_dim)
+        logger.info(f"processing time batch {batch_start}:{batch_end}")
+
+        for attempt in range(max_retries):
+            try:
+                # extract array values at point locations for this time batch
+                stack_batch = stack.isel(time=slice(batch_start, batch_end))
+                sample_batch = stack_batch.sel(
+                    x=indexer.x, y=indexer.y, method="nearest", tolerance=20
+                )
+
+                # convert to dataframe
+                sample_batch_df = sample_batch.to_dataframe()
+
+                # identify non-NA rows
+                int16_cols = sample_batch_df[bands].select_dtypes("int16").columns
+                valid = (sample_batch_df[int16_cols] != NODATA).all(axis=1)
+
+                # append valid rows to batch list
+                batch_dfs.append(sample_batch_df[valid])
+                logger.info(f"successfully processed batch {batch_start}:{batch_end}")
+                break
+
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (2**attempt)  # exponential backoff
+                    logger.warning(
+                        f"Batch {batch_start}:{batch_end} attempt {attempt + 1}/{max_retries} failed with error: {e}. "
+                        f"Retrying in {wait_time} seconds..."
+                    )
+                    time.sleep(wait_time)
+                else:
+                    logger.error(
+                        f"All {max_retries} attempts failed for batch {batch_start}:{batch_end}. Last error: {e}"
+                    )
+                    raise
+
+    # combine all batches
+    logger.info("combining all batches into final dataframe")
+    sample_df = pd.concat(batch_dfs, axis=0)
 
     output_parquet = f"{output_dir}/point_sample.parquet"
-    sample_df[valid].to_parquet(output_parquet, compression="zstd")
+    sample_df.to_parquet(output_parquet, compression="zstd")
 
     catalog = Catalog(
         id="DPS",
@@ -371,6 +423,12 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
     )
+    parse.add_argument(
+        "--batch_size",
+        help="Number of time steps to process in each batch (default: 20)",
+        type=int,
+        default=20,
+    )
     args = parse.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -386,32 +444,14 @@ if __name__ == "__main__":
         f"running with mgrs_tile: {args.mgrs_tile}, start_datetime: {start_datetime}, end_datetime: {end_datetime}"
     )
 
-    # Retry loop for handling intermittent failures
-    max_retries = 3
-    retry_delay = 5  # seconds
-
-    for attempt in range(max_retries):
-        try:
-            run(
-                start_datetime=start_datetime,
-                end_datetime=end_datetime,
-                mgrs_tile=args.mgrs_tile,
-                points_href=args.points_href,
-                id_col=args.id_col,
-                bands=args.bands if args.bands else DEFAULT_BANDS,
-                output_dir=output_dir,
-                direct_bucket_access=args.direct_bucket_access,
-            )
-            logging.info("Successfully completed processing")
-            break
-        except Exception as e:
-            if attempt < max_retries - 1:
-                wait_time = retry_delay * (2**attempt)  # exponential backoff
-                logging.warning(
-                    f"Attempt {attempt + 1}/{max_retries} failed with error: {e}. "
-                    f"Retrying in {wait_time} seconds..."
-                )
-                time.sleep(wait_time)
-            else:
-                logging.error(f"All {max_retries} attempts failed. Last error: {e}")
-                raise
+    run(
+        start_datetime=start_datetime,
+        end_datetime=end_datetime,
+        mgrs_tile=args.mgrs_tile,
+        points_href=args.points_href,
+        id_col=args.id_col,
+        bands=args.bands if args.bands else DEFAULT_BANDS,
+        output_dir=output_dir,
+        direct_bucket_access=args.direct_bucket_access,
+        batch_size=args.batch_size,
+    )
