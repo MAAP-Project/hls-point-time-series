@@ -298,7 +298,9 @@ def run(
         },
         assets={
             "parquet": Asset(
-                href=output_parquet, title="point sample values", description="HLS "
+                href=output_parquet,
+                title="HLS time series point sample",
+                description="HLS time series point sample",
             )
         },
     )
