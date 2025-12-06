@@ -311,8 +311,7 @@ def run(
                 # get the indexer for point locations
                 indexer = pts_clipped[["x", "y"]].to_xarray()
                 # extract array values at point locations for this time batch
-                stack_batch = stack.isel(time=slice(batch_start, batch_end))
-                sample_batch = stack_batch.sel(
+                sample_batch = stack.sel(
                     x=indexer.x, y=indexer.y, method="nearest", tolerance=20
                 )
 
