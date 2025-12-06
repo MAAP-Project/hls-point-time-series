@@ -209,7 +209,7 @@ def run(
     id_col: str | None = None,
     bands: list[str] = DEFAULT_BANDS,
     direct_bucket_access: bool = False,
-    batch_size: int = 20,
+    batch_size: int = 100,
 ):
     pts = gpd.read_file(points_href)
 
@@ -265,50 +265,51 @@ def run(
 
     logger.info(f"fixed proj metadata for {fixed_count} items")
 
-    logger.info("loading into xarray via odc.stac")
-    stack = (
-        odc.stac.load(
-            items,
-            stac_cfg=HLS_ODC_STAC_CONFIG,
-            bands=bands,
-            chunks={"x": 512, "y": 512},
-            groupby=group_by_sensor_and_date,
-        )
-        .assign_coords(item_id=[item.id for item in items])
-        .sortby("time")
-    )
-
-    crs = items[0].ext.proj.crs_string
-    if not crs:
-        raise ValueError("could not parse crs_string from STAC items")
-
-    stack_extent = box(*stack.rio.bounds())
-
-    # identify points within the MGRS tile extent
-    pts_clipped = gpd.clip(pts.to_crs(crs), mask=stack_extent)
-
-    # get projected coordinates
-    pts_clipped["x"] = pts_clipped.geometry.x
-    pts_clipped["y"] = pts_clipped.geometry.y
-
-    # get the indexer for point locations
-    indexer = pts_clipped[["x", "y"]].to_xarray()
-
     # get time dimension size
-    time_dim = stack.sizes["time"]
-    logger.info(f"processing {time_dim} time steps in batches of {batch_size}")
+    logger.info(f"processing {len(items)} items in batches of {batch_size}")
 
     # process time dimension in batches with retry logic
     batch_dfs = []
     max_retries = 3
     retry_delay = 5  # seconds
 
-    for batch_start in range(0, time_dim, batch_size):
-        batch_end = min(batch_start + batch_size, time_dim)
-        logger.info(f"processing time batch {batch_start}:{batch_end}")
+    for batch_start in range(0, len(items), batch_size):
+        batch_end = min(batch_start + batch_size, len(items))
+        logger.info(f"processing batch {batch_start}:{batch_end}")
 
         for attempt in range(max_retries):
             try:
+                batch_items = items[batch_start:batch_end]
+                logger.info(
+                    f"loading {len(batch_items)} items into xarray via odc.stac"
+                )
+                stack = (
+                    odc.stac.load(
+                        batch_items,
+                        stac_cfg=HLS_ODC_STAC_CONFIG,
+                        bands=bands,
+                        chunks={"x": 512, "y": 512},
+                        groupby=group_by_sensor_and_date,
+                    )
+                    .assign_coords(item_id=[item.id for item in batch_items])
+                    .sortby("time")
+                )
+
+                crs = batch_items[0].ext.proj.crs_string
+                if not crs:
+                    raise ValueError("could not parse crs_string from STAC items")
+
+                stack_extent = box(*stack.rio.bounds())
+
+                # identify points within the MGRS tile extent
+                pts_clipped = gpd.clip(pts.to_crs(crs), mask=stack_extent)
+
+                # get projected coordinates
+                pts_clipped["x"] = pts_clipped.geometry.x
+                pts_clipped["y"] = pts_clipped.geometry.y
+
+                # get the indexer for point locations
+                indexer = pts_clipped[["x", "y"]].to_xarray()
                 # extract array values at point locations for this time batch
                 stack_batch = stack.isel(time=slice(batch_start, batch_end))
                 sample_batch = stack_batch.sel(
