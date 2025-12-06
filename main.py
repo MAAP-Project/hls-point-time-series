@@ -12,10 +12,12 @@ from typing import Tuple
 import geopandas as gpd
 import odc.stac
 import pandas as pd
+import rasterio
 import rioxarray  # noqa
 from maap.maap import MAAP
 from odc.stac import ParsedItem
 from pystac import Asset, Catalog, CatalogType, Item
+from rasterio.session import AWSSession
 from rasterio.warp import transform_bounds
 from rustac import DuckdbClient
 from shapely.geometry import box, mapping
@@ -223,6 +225,7 @@ def run(
         logger.info(f"no STAC items found for tile id {mgrs_tile}")
         return
 
+    rasterio_env = {}
     if direct_bucket_access:
         maap = MAAP(maap_host="api.maap-project.org")
         creds = maap.aws.earthdata_s3_credentials(
@@ -237,10 +240,30 @@ def run(
                 "region_name": "us-west-2",
             },
         )
+        rasterio_env["session"] = AWSSession(
+            **{
+                "aws_access_key_id": creds["accessKeyId"],
+                "aws_secret_access_key": creds["secretAccessKey"],
+                "aws_session_token": creds["sessionToken"],
+                "region_name": "us-west-2",
+            }
+        )
         for item in items:
             for asset in item.assets.values():
                 if asset.href.startswith(URL_PREFIX):
                     asset.href = asset.href.replace(URL_PREFIX, "s3://")
+
+    logger.info("checking proj metadata")
+    fixed_count = 0
+    with rasterio.Env(**rasterio_env):
+        for item in items:
+            if (not item.ext.proj.shape) and (not item.ext.proj.transform):
+                fixed_count += 1
+                with rasterio.open(item.assets["Fmask"].href) as src:
+                    item.ext.proj.shape = src.shape
+                    item.ext.proj.transform = list(src.transform)
+
+    logger.info(f"fixed proj metadata for {fixed_count} items")
 
     logger.info("loading into xarray via odc.stac")
     stack = (
@@ -272,7 +295,7 @@ def run(
     indexer = pts_clipped[["x", "y"]].to_xarray()
 
     # get time dimension size
-    time_dim = stack.dims["time"]
+    time_dim = stack.sizes["time"]
     logger.info(f"processing {time_dim} time steps in batches of {batch_size}")
 
     # process time dimension in batches with retry logic
@@ -425,9 +448,9 @@ if __name__ == "__main__":
     )
     parse.add_argument(
         "--batch_size",
-        help="Number of time steps to process in each batch (default: 20)",
+        help="Number of time steps to process in each batch (default: 100)",
         type=int,
-        default=20,
+        default=100,
     )
     args = parse.parse_args()
 

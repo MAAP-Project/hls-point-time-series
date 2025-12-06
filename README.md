@@ -29,12 +29,12 @@ By using `rustac` + parquet files there is no API between the requester and the 
 **Basic usage with default bands:**
 ```bash
 uv run main.py \
-  --start_datetime "2024-01-01T00:00:00Z" \
-  --end_datetime "2024-12-31T23:59:59Z" \
+  --start_datetime "2013-04-01T00:00:00Z" \
+  --end_datetime "2013-04-31T23:59:59Z" \
   --mgrs_tile "15TYK" \
-  --points_href "/path/to/points.geojson" \
+  --points_href "test_data/points.geojson" \
   --id_col "point_id" \
-  --output_dir "./output" \
+  --output_dir "/tmp/output" \
   --direct_bucket_access  # optional: use S3 URIs instead of HTTPS (must be running in us-west-2)
 ```
 
