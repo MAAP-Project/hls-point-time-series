@@ -20,9 +20,47 @@ This DPS algorithm uses [`rustac`](https://github.com/stac-utils/rustac-py) to q
 By using `rustac` + parquet files there is no API between the requester and the actual data!
 
 > [!WARNING]
-> This archive of HLS STAC records is experimental and only contains items through October 2025.
+> This archive of HLS STAC records is experimental and is ~1.5 months behind the current time. 
+> See the [hls-stac-geoparquet-archive repo](https://github.com/MAAP-Project/hls-stac-geoparquet-archive) for details.
 
 ## Usage
+
+### MAAP DPS
+
+To run the algorithm via DPS, you can follow this example. Provide the S3 URI for an input spatial file using the `input_file` argument. This file will be read using `geopandas` then the records will be filtered down to the ones that intersect the HLS raster asset footprint for the selected MGRS tile.
+
+```python
+from maap.maap import MAAP
+
+maap = MAAP(maap_host="api.maap-project.org")
+
+jobs = []
+for tile in ["14VLQ", "18WXS", "16WFB", "26WMC", "19VDL"]:
+    job = maap.submitJob(
+        algo_id="HLSPointTimeSeriesExtraction",
+        version="v0.2",
+        identifier="test-run",
+        queue="maap-dps-worker-16gb",
+        input_file="s3://maap-ops-workspace/shared/henrydevseed/hls-boreal-sample-points.gpkg",
+        start_datetime="2013-01-01T00:00:00Z",
+        end_datetime="2025-10-31T23:59:59Z",
+        mgrs_tile=tile,
+        id_col="sample.id",
+        bands="red green blue swir_1 swir_2 nir_narrow Fmask",
+    )
+    jobs.append(job)
+
+```
+
+Each job will produce a single parquet file in the DPS output folder along with a STAC item. The parquet files for this set of jobs can be read with `duckdb` like this:
+```sql
+CREATE OR REPLACE SECRET secret (
+     TYPE S3,
+     PROVIDER CREDENTIAL_CHAIN
+);
+
+SELECT * from read_parquet('s3://maap-ops-workspace/<YOUR_USERNAME>/dps_output/HLSPointTimeSeriesExtraction/v0.2/test-run/**/*.parquet');
+```
 
 ### Direct Python Invocation
 
@@ -30,11 +68,12 @@ By using `rustac` + parquet files there is no API between the requester and the 
 ```bash
 uv run main.py \
   --start_datetime "2013-04-01T00:00:00Z" \
-  --end_datetime "2013-04-31T23:59:59Z" \
-  --mgrs_tile "15TYK" \
+  --end_datetime "2013-05-31T23:59:59Z" \
+  --mgrs_tile "15UWP" \
   --points_href "test_data/points.geojson" \
   --id_col "point_id" \
   --output_dir "/tmp/output" \
+  --batch_size 2 \
   --direct_bucket_access  # optional: use S3 URIs instead of HTTPS (must be running in us-west-2)
 ```
 
@@ -43,8 +82,8 @@ uv run main.py \
 uv run main.py \
   --start_datetime "2024-01-01T00:00:00Z" \
   --end_datetime "2024-12-31T23:59:59Z" \
-  --mgrs_tile "15TYK" \
-  --points_href "/path/to/points.geojson" \
+  --mgrs_tile "15UWP" \
+  --points_href "test_data/points.geojson" \
   --bands red --bands green --bands blue --bands Fmask \
   --output_dir "./output"
 ```
