@@ -40,10 +40,8 @@ GDAL_CONFIG = {
     "GDAL_HTTP_VERSION": "2",
     "PYTHONWARNINGS": "ignore",
     "VSI_CACHE": "TRUE",
-    "VSI_CACHE_SIZE": "536870912",
-    "GDAL_NUM_THREADS": "ALL_CPUS",
-    # "CPL_DEBUG": "ON" if debug else "OFF",
-    # "CPL_CURL_VERBOSE": "YES" if debug else "NO",
+    "VSI_CACHE_SIZE": "50000000",
+    "GDAL_NUM_THREADS": "8",
 }
 
 # LPCLOUD S3 CREDENTIAL REFRESH
