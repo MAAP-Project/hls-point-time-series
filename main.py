@@ -7,7 +7,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Tuple
+from typing import Any, Tuple
 
 import geopandas as gpd
 import odc.stac
@@ -32,7 +32,7 @@ BBox = Tuple[float, float, float, float]
 GDAL_CONFIG = {
     "CPL_TMPDIR": "/tmp",
     "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": "TIF",
-    "GDAL_CACHEMAX": "75%",
+    "GDAL_CACHEMAX": "512",
     "GDAL_INGESTED_BYTES_AT_OPEN": "32768",
     "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
     "GDAL_HTTP_MERGE_CONSECUTIVE_RANGES": "YES",
@@ -45,6 +45,9 @@ GDAL_CONFIG = {
     # "CPL_DEBUG": "ON" if debug else "OFF",
     # "CPL_CURL_VERBOSE": "YES" if debug else "NO",
 }
+
+# LPCLOUD S3 CREDENTIAL REFRESH
+CREDENTIAL_REFRESH_SECONDS = 50 * 60
 
 HLS_COLLECTIONS = ["HLSL30_2.0", "HLSS30_2.0"]
 HLS_STAC_GEOPARQUET_HREF = "s3://nasa-maap-data-store/file-staging/nasa-map/hls-stac-geoparquet-archive/v2/{collection}/**/*.parquet"
@@ -200,6 +203,25 @@ def get_stac_items(
     return [Item.from_dict(item) for item in items]
 
 
+def get_s3_creds() -> dict[str, Any]:
+    maap = MAAP(maap_host="api.maap-project.org")
+    creds = maap.aws.earthdata_s3_credentials(
+        "https://data.lpdaac.earthdatacloud.nasa.gov/s3credentials"
+    )
+    creds_dict = {
+        "aws_access_key_id": creds["accessKeyId"],
+        "aws_secret_access_key": creds["secretAccessKey"],
+        "aws_session_token": creds["sessionToken"],
+        "region_name": "us-west-2",
+    }
+    odc.stac.configure_rio(
+        cloud_defaults=True,
+        aws=creds_dict,
+    )
+
+    return creds_dict
+
+
 def run(
     mgrs_tile: str,
     points_href: str,
@@ -209,7 +231,7 @@ def run(
     id_col: str | None = None,
     bands: list[str] = DEFAULT_BANDS,
     direct_bucket_access: bool = False,
-    batch_size: int = 100,
+    batch_size: int = 20,
 ):
     pts = gpd.read_file(points_href)
 
@@ -226,28 +248,11 @@ def run(
         return
 
     rasterio_env = {}
+    cred_time = None
     if direct_bucket_access:
-        maap = MAAP(maap_host="api.maap-project.org")
-        creds = maap.aws.earthdata_s3_credentials(
-            "https://data.lpdaac.earthdatacloud.nasa.gov/s3credentials"
-        )
-        odc.stac.configure_rio(
-            cloud_defaults=True,
-            aws={
-                "aws_access_key_id": creds["accessKeyId"],
-                "aws_secret_access_key": creds["secretAccessKey"],
-                "aws_session_token": creds["sessionToken"],
-                "region_name": "us-west-2",
-            },
-        )
-        rasterio_env["session"] = AWSSession(
-            **{
-                "aws_access_key_id": creds["accessKeyId"],
-                "aws_secret_access_key": creds["secretAccessKey"],
-                "aws_session_token": creds["sessionToken"],
-                "region_name": "us-west-2",
-            }
-        )
+        cred_time = time.time()
+        s3_creds = get_s3_creds()
+        rasterio_env["session"] = AWSSession(**s3_creds)
         for item in items:
             for asset in item.assets.values():
                 if asset.href.startswith(URL_PREFIX):
@@ -274,6 +279,13 @@ def run(
     retry_delay = 5  # seconds
 
     for batch_start in range(0, len(items), batch_size):
+        if cred_time:
+            elapsed = time.time() - cred_time
+            if elapsed > CREDENTIAL_REFRESH_SECONDS:
+                logger.info("refreshing S3 credentials")
+                s3_creds = get_s3_creds()
+                cred_time = time.time()
+
         batch_end = min(batch_start + batch_size, len(items))
         logger.info(f"processing batch {batch_start}:{batch_end}")
 
@@ -450,7 +462,7 @@ if __name__ == "__main__":
         "--batch_size",
         help="Number of time steps to process in each batch (default: 100)",
         type=int,
-        default=100,
+        default=20,
     )
     args = parse.parse_args()
 
