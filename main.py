@@ -5,15 +5,14 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Tuple
 
 import geopandas as gpd
-import odc.stac
 import pandas as pd
 import rasterio
-import rioxarray  # noqa
 from maap.maap import MAAP
 from odc.stac import ParsedItem
 from pystac import Asset, Catalog, CatalogType, Item
@@ -23,9 +22,10 @@ from rustac import DuckdbClient
 from shapely.geometry import box, mapping
 
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
 )
-logger = logging.getLogger(__name__)
+logging.getLogger("botocore").setLevel(logging.WARNING)
+logger = logging.getLogger("HLSPointTimeSeries")
 
 BBox = Tuple[float, float, float, float]
 
@@ -57,60 +57,38 @@ DTYPE = "int16"
 FMASK_DTYPE = "uint8"
 NODATA = -9999
 FMASK_NODATA = 255
-HLS_ODC_STAC_CONFIG = {
+
+BAND_MAPPING = {
     "HLSL30_2.0": {
-        "assets": {
-            "*": {
-                "nodata": NODATA,
-                "data_type": DTYPE,
-            },
-            "Fmask": {
-                "nodata": FMASK_NODATA,
-                "data_type": FMASK_DTYPE,
-            },
-        },
-        "aliases": {
-            "coastal_aerosol": "B01",
-            "blue": "B02",
-            "green": "B03",
-            "red": "B04",
-            "nir_narrow": "B05",
-            "swir_1": "B06",
-            "swir_2": "B07",
-            "cirrus": "B09",
-            "thermal_infrared_1": "B10",
-            "thermal": "B11",
-        },
+        "coastal_aerosol": "B01",
+        "blue": "B02",
+        "green": "B03",
+        "red": "B04",
+        "nir_narrow": "B05",
+        "swir_1": "B06",
+        "swir_2": "B07",
+        "cirrus": "B09",
+        "thermal_infrared_1": "B10",
+        "thermal": "B11",
+        "Fmask": "Fmask",
     },
     "HLSS30_2.0": {
-        "assets": {
-            "*": {
-                "nodata": NODATA,
-                "data_type": DTYPE,
-            },
-            "Fmask": {
-                "nodata": FMASK_NODATA,
-                "data_type": FMASK_DTYPE,
-            },
-        },
-        "aliases": {
-            "coastal_aerosol": "B01",
-            "blue": "B02",
-            "green": "B03",
-            "red": "B04",
-            "red_edge_1": "B05",
-            "red_edge_2": "B06",
-            "red_edge_3": "B07",
-            "nir_broad": "B08",
-            "nir_narrow": "B8A",
-            "water_vapor": "B09",
-            "cirrus": "B10",
-            "swir_1": "B11",
-            "swir_2": "B12",
-        },
+        "coastal_aerosol": "B01",
+        "blue": "B02",
+        "green": "B03",
+        "red": "B04",
+        "red_edge_1": "B05",
+        "red_edge_2": "B06",
+        "red_edge_3": "B07",
+        "nir_broad": "B08",
+        "nir_narrow": "B8A",
+        "water_vapor": "B09",
+        "cirrus": "B10",
+        "swir_1": "B11",
+        "swir_2": "B12",
+        "Fmask": "Fmask",
     },
 }
-
 # these are the ones that we are going to use
 DEFAULT_BANDS = [
     "red",
@@ -208,18 +186,49 @@ def get_s3_creds() -> dict[str, Any]:
     creds = maap.aws.earthdata_s3_credentials(
         "https://data.lpdaac.earthdatacloud.nasa.gov/s3credentials"
     )
-    creds_dict = {
+
+    return {
         "aws_access_key_id": creds["accessKeyId"],
         "aws_secret_access_key": creds["secretAccessKey"],
         "aws_session_token": creds["sessionToken"],
         "region_name": "us-west-2",
     }
-    odc.stac.configure_rio(
-        cloud_defaults=True,
-        aws=creds_dict,
-    )
 
-    return creds_dict
+
+def extract_asset_values(
+    item: Item, points_df: pd.DataFrame, bands: list[str], rasterio_env: dict[str, Any]
+):
+    """
+    Directly samples points from S3 COGs without loading grids.
+    points_df: DataFrame with 'x', 'y' columns in the same CRS as the items.
+    """
+
+    coords = list(zip(points_df.geometry.x, points_df.geometry.y))
+
+    with rasterio.Env(**rasterio_env):
+
+        def fetch_band(band_name: str):
+            asset_key = BAND_MAPPING[item.collection_id][band_name]
+            asset_href = item.assets[asset_key].href
+
+            try:
+                with rasterio.open(asset_href) as src:
+                    values = list(src.sample(coords))
+                    return band_name, [v[0] for v in values]
+
+            except Exception as e:
+                logger.warning(f"Failed to read {band_name} for {item.id}: {e}")
+                return band_name, [None] * len(coords)
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            band_data = list(executor.map(fetch_band, bands))
+
+        band_dict = dict(band_data)
+        band_dict.update(
+            points_df.reset_index().drop(columns=["geometry"]).to_dict(orient="list")
+        )
+
+    return pd.DataFrame(band_dict).assign(time=item.datetime, item_id=item.id)
 
 
 def run(
@@ -231,7 +240,6 @@ def run(
     id_col: str | None = None,
     bands: list[str] = DEFAULT_BANDS,
     direct_bucket_access: bool = False,
-    batch_size: int = 20,
 ):
     pts = gpd.read_file(points_href)
 
@@ -247,6 +255,30 @@ def run(
         logger.info(f"no STAC items found for tile id {mgrs_tile}")
         return
 
+    crs = items[0].ext.proj.crs_string
+    if not crs:
+        raise ValueError("could not parse crs_string from STAC items")
+
+    item_bboxes = [item.bbox for item in items if item.bbox]
+    stack_bbox = (
+        min(xmin for (xmin, _, _, _) in item_bboxes),
+        min(ymin for (_, ymin, _, _) in item_bboxes),
+        min(xmax for (_, _, xmax, _) in item_bboxes),
+        min(ymax for (_, _, _, ymax) in item_bboxes),
+    )
+
+    stack_extent = box(*stack_bbox)
+    stack_bbox_proj = transform_bounds("epsg:4326", crs, *stack_bbox)
+    stack_extent_proj = box(*stack_bbox_proj)
+
+    # identify points within the MGRS tile extent
+    pts_clipped = gpd.clip(pts.to_crs(crs), mask=stack_extent_proj)
+    logger.info(f"extracting values for {pts_clipped.shape[0]} points")
+
+    # get projected coordinates
+    pts_clipped["x"] = pts_clipped.geometry.x
+    pts_clipped["y"] = pts_clipped.geometry.y
+
     rasterio_env = {}
     cred_time = None
     if direct_bucket_access:
@@ -258,27 +290,12 @@ def run(
                 if asset.href.startswith(URL_PREFIX):
                     asset.href = asset.href.replace(URL_PREFIX, "s3://")
 
-    logger.info("checking proj metadata")
-    fixed_count = 0
-    with rasterio.Env(**rasterio_env):
-        for item in items:
-            if (not item.ext.proj.shape) and (not item.ext.proj.transform):
-                fixed_count += 1
-                with rasterio.open(item.assets["Fmask"].href) as src:
-                    item.ext.proj.shape = src.shape
-                    item.ext.proj.transform = list(src.transform)
-
-    logger.info(f"fixed proj metadata for {fixed_count} items")
-
-    # get time dimension size
-    logger.info(f"processing {len(items)} items in batches of {batch_size}")
-
     # process time dimension in batches with retry logic
-    batch_dfs = []
+    dfs = []
     max_retries = 3
     retry_delay = 5  # seconds
 
-    for batch_start in range(0, len(items), batch_size):
+    for item in items:
         if cred_time:
             elapsed = time.time() - cred_time
             if elapsed > CREDENTIAL_REFRESH_SECONDS:
@@ -286,76 +303,36 @@ def run(
                 s3_creds = get_s3_creds()
                 cred_time = time.time()
 
-        batch_end = min(batch_start + batch_size, len(items))
-        logger.info(f"processing batch {batch_start}:{batch_end}")
-
         for attempt in range(max_retries):
             try:
-                batch_items = items[batch_start:batch_end]
-                logger.info(
-                    f"loading {len(batch_items)} items into xarray via odc.stac"
+                df = extract_asset_values(
+                    item=item,
+                    points_df=pts_clipped,
+                    bands=bands,
+                    rasterio_env=rasterio_env,
                 )
-                stack = (
-                    odc.stac.load(
-                        batch_items,
-                        stac_cfg=HLS_ODC_STAC_CONFIG,
-                        bands=bands,
-                        chunks={"x": 512, "y": 512},
-                        groupby=group_by_sensor_and_date,
-                    )
-                    .assign_coords(item_id=[item.id for item in batch_items])
-                    .sortby("time")
-                )
-
-                crs = batch_items[0].ext.proj.crs_string
-                if not crs:
-                    raise ValueError("could not parse crs_string from STAC items")
-
-                stack_extent = box(*stack.rio.bounds())
-
-                # identify points within the MGRS tile extent
-                pts_clipped = gpd.clip(pts.to_crs(crs), mask=stack_extent)
-
-                # get projected coordinates
-                pts_clipped["x"] = pts_clipped.geometry.x
-                pts_clipped["y"] = pts_clipped.geometry.y
-
-                # get the indexer for point locations
-                indexer = pts_clipped[["x", "y"]].to_xarray()
-                # extract array values at point locations for this time batch
-                sample_batch = stack.sel(
-                    x=indexer.x, y=indexer.y, method="nearest", tolerance=20
-                )
-
-                # convert to dataframe
-                sample_batch_df = sample_batch.to_dataframe()
-
-                # identify non-NA rows
-                int16_cols = sample_batch_df[bands].select_dtypes("int16").columns
-                valid = (sample_batch_df[int16_cols] != NODATA).all(axis=1)
-
                 # append valid rows to batch list
-                batch_dfs.append(sample_batch_df[valid])
-                logger.info(f"successfully processed batch {batch_start}:{batch_end}")
+                # TODO: check for valid values
+                dfs.append(df)
                 break
 
             except Exception as e:
                 if attempt < max_retries - 1:
                     wait_time = retry_delay * (2**attempt)  # exponential backoff
                     logger.warning(
-                        f"Batch {batch_start}:{batch_end} attempt {attempt + 1}/{max_retries} failed with error: {e}. "
+                        f"Item {item.id} attempt {attempt + 1}/{max_retries} failed with error: {e}. "
                         f"Retrying in {wait_time} seconds..."
                     )
                     time.sleep(wait_time)
                 else:
                     logger.error(
-                        f"All {max_retries} attempts failed for batch {batch_start}:{batch_end}. Last error: {e}"
+                        f"All {max_retries} attempts failed for item {item.id}. Last error: {e}"
                     )
                     raise
 
     # combine all batches
     logger.info("combining all batches into final dataframe")
-    sample_df = pd.concat(batch_dfs, axis=0)
+    sample_df = pd.concat(dfs, axis=0)
 
     output_parquet = f"{output_dir}/point_sample.parquet"
     sample_df.to_parquet(output_parquet, compression="zstd")
@@ -366,7 +343,7 @@ def run(
         catalog_type=CatalogType.SELF_CONTAINED,
     )
 
-    bbox = transform_bounds(crs, "epsg:4326", *stack.rio.bounds())
+    bbox = transform_bounds(crs, "epsg:4326", *stack_bbox)
 
     item = Item(
         id="-".join(
@@ -392,9 +369,7 @@ def run(
         },
     )
     item.ext.add("proj")
-    item.ext.proj.apply(
-        code=crs, bbox=stack.rio.bounds(), geometry=mapping(box(*stack.rio.bounds()))
-    )
+    item.ext.proj.apply(code=crs, bbox=list(stack_bbox), geometry=mapping(stack_extent))
 
     item.set_self_href(f"{output_dir}/item.json")
 
@@ -458,24 +433,18 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
     )
-    parse.add_argument(
-        "--batch_size",
-        help="Number of time steps to process in each batch (default: 100)",
-        type=int,
-        default=20,
-    )
     args = parse.parse_args()
 
     output_dir = Path(args.output_dir)
     start_datetime = parse_datetime_utc(args.start_datetime)
     end_datetime = parse_datetime_utc(args.end_datetime)
 
-    logging.info(
+    logger.info(
         f"setting GDAL config environment variables:\n{json.dumps(GDAL_CONFIG, indent=2)}"
     )
     os.environ.update(GDAL_CONFIG)
 
-    logging.info(
+    logger.info(
         f"running with mgrs_tile: {args.mgrs_tile}, start_datetime: {start_datetime}, end_datetime: {end_datetime}"
     )
 
@@ -488,5 +457,4 @@ if __name__ == "__main__":
         bands=args.bands if args.bands else DEFAULT_BANDS,
         output_dir=output_dir,
         direct_bucket_access=args.direct_bucket_access,
-        batch_size=args.batch_size,
     )
