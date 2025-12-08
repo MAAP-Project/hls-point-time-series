@@ -330,8 +330,6 @@ def run(
         catalog_type=CatalogType.SELF_CONTAINED,
     )
 
-    bbox = transform_bounds(crs, "epsg:4326", *stack_bbox)
-
     item = Item(
         id="-".join(
             [
@@ -340,8 +338,8 @@ def run(
                 end_datetime.strftime("%Y%m%d"),
             ]
         ),
-        bbox=bbox,
-        geometry=mapping(box(*bbox)),
+        bbox=list(stack_bbox),
+        geometry=mapping(stack_extent),
         datetime=end_datetime,
         properties={
             "start_datetime": start_datetime.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -356,7 +354,9 @@ def run(
         },
     )
     item.ext.add("proj")
-    item.ext.proj.apply(code=crs, bbox=list(stack_bbox), geometry=mapping(stack_extent))
+    item.ext.proj.apply(
+        code=crs, bbox=list(stack_bbox_proj), geometry=mapping(stack_extent_proj)
+    )
 
     item.set_self_href(f"{output_dir}/item.json")
 
