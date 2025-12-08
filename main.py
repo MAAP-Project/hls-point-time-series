@@ -14,7 +14,6 @@ import geopandas as gpd
 import pandas as pd
 import rasterio
 from maap.maap import MAAP
-from odc.stac import ParsedItem
 from pystac import Asset, Catalog, CatalogType, Item
 from rasterio.session import AWSSession
 from rasterio.warp import transform_bounds
@@ -122,18 +121,6 @@ def parse_datetime_utc(dt_string: str) -> datetime:
     return dt
 
 
-def group_by_sensor_and_date(
-    item: Item,
-    parsed: ParsedItem,
-    idx: int,
-) -> str:
-    id_split = item.id.split(".")
-    sensor = id_split[1]
-    day = id_split[3][:7]
-
-    return f"{sensor}_{day}"
-
-
 def get_stac_items(
     mgrs_tile: str, start_datetime: datetime, end_datetime: datetime
 ) -> list[Item]:
@@ -205,28 +192,27 @@ def extract_asset_values(
 
     coords = list(zip(points_df.geometry.x, points_df.geometry.y))
 
-    with rasterio.Env(**rasterio_env):
-
-        def fetch_band(band_name: str):
-            asset_key = BAND_MAPPING[item.collection_id][band_name]
-            asset_href = item.assets[asset_key].href
-
-            try:
+    def fetch_band(band_name: str):
+        asset_key = BAND_MAPPING[item.collection_id][band_name]
+        asset_href = item.assets[asset_key].href
+        logger.info(f"opening {asset_href}")
+        try:
+            with rasterio.Env(**rasterio_env):
                 with rasterio.open(asset_href) as src:
                     values = list(src.sample(coords))
                     return band_name, [v[0] for v in values]
 
-            except Exception as e:
-                logger.warning(f"Failed to read {band_name} for {item.id}: {e}")
-                return band_name, [None] * len(coords)
+        except Exception as e:
+            logger.warning(f"Failed to read {band_name} for {item.id}: {e}")
+            return band_name, [None] * len(coords)
 
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            band_data = list(executor.map(fetch_band, bands))
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        band_data = list(executor.map(fetch_band, bands))
 
-        band_dict = dict(band_data)
-        band_dict.update(
-            points_df.reset_index().drop(columns=["geometry"]).to_dict(orient="list")
-        )
+    band_dict = dict(band_data)
+    band_dict.update(
+        points_df.reset_index().drop(columns=["geometry"]).to_dict(orient="list")
+    )
 
     return pd.DataFrame(band_dict).assign(time=item.datetime, item_id=item.id)
 
@@ -263,8 +249,8 @@ def run(
     stack_bbox = (
         min(xmin for (xmin, _, _, _) in item_bboxes),
         min(ymin for (_, ymin, _, _) in item_bboxes),
-        min(xmax for (_, _, xmax, _) in item_bboxes),
-        min(ymax for (_, _, _, ymax) in item_bboxes),
+        max(xmax for (_, _, xmax, _) in item_bboxes),
+        max(ymax for (_, _, _, ymax) in item_bboxes),
     )
 
     stack_extent = box(*stack_bbox)
@@ -301,6 +287,7 @@ def run(
             if elapsed > CREDENTIAL_REFRESH_SECONDS:
                 logger.info("refreshing S3 credentials")
                 s3_creds = get_s3_creds()
+                rasterio_env["session"] = AWSSession(**s3_creds)
                 cred_time = time.time()
 
         for attempt in range(max_retries):
