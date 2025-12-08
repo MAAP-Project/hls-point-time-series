@@ -198,15 +198,6 @@ wheels = [
 ]
 
 [[package]]
-name = "cachetools"
-version = "6.2.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/cc/7e/b975b5814bd36faf009faebe22c1072a1fa1168db34d285ef0ba071ad78c/cachetools-6.2.1.tar.gz", hash = "sha256:3f391e4bd8f8bf0931169baf7456cc822705f4e2a31f840d218f445b9a854201", size = 31325, upload-time = "2025-10-12T14:55:30.139Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/96/c5/1e741d26306c42e2bf6ab740b2202872727e0f606033c9dd713f8b93f5a8/cachetools-6.2.1-py3-none-any.whl", hash = "sha256:09868944b6dde876dfd44e1d47e18484541eaf12f26f29b7af91b26cc892d701", size = 11280, upload-time = "2025-10-12T14:55:28.382Z" },
-]
-
-[[package]]
 name = "certifi"
 version = "2025.10.5"
 source = { registry = "https://pypi.org/simple" }
@@ -518,11 +509,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/a4/2b/36b8753d881ff8fcf9c57eadd2b9379815cbe08fde7ded4e52c4cbb4b227/dask-2025.10.0-py3-none-any.whl", hash = "sha256:86c0a4aecbed3eae938f13a52bcc3fdc35852cce34d7d701590c15850b92506e", size = 1481586, upload-time = "2025-10-14T19:50:21.983Z" },
 ]
 
-[package.optional-dependencies]
-array = [
-    { name = "numpy" },
-]
-
 [[package]]
 name = "debugpy"
 version = "1.8.17"
@@ -699,13 +685,11 @@ dependencies = [
     { name = "dask" },
     { name = "geopandas" },
     { name = "maap-py" },
-    { name = "odc-stac" },
     { name = "pyarrow" },
     { name = "pyproj" },
     { name = "pystac" },
     { name = "rasterio" },
     { name = "rio-stac" },
-    { name = "rioxarray" },
     { name = "rustac" },
     { name = "shapely" },
 ]
@@ -725,13 +709,11 @@ requires-dist = [
     { name = "dask", specifier = ">=2025.10.0" },
     { name = "geopandas", specifier = ">=1.1.1" },
     { name = "maap-py", specifier = ">=4.2.0" },
-    { name = "odc-stac", specifier = ">=0.4.0" },
     { name = "pyarrow", specifier = ">=22.0.0" },
     { name = "pyproj", specifier = ">=3.7.2" },
     { name = "pystac", specifier = ">=1.14.1" },
     { name = "rasterio", specifier = ">=1.4.3" },
     { name = "rio-stac", specifier = ">=0.10.1" },
-    { name = "rioxarray", specifier = ">=0.20.0" },
     { name = "rustac", specifier = ">=0.8.4" },
     { name = "shapely", specifier = ">=2.1.2" },
 ]
@@ -1566,60 +1548,6 @@ wheels = [
 ]
 
 [[package]]
-name = "odc-geo"
-version = "0.4.10"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "affine" },
-    { name = "cachetools" },
-    { name = "numpy" },
-    { name = "pyproj" },
-    { name = "shapely" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/53/f6/f22d9728ed1652f092bdb8e0f04cf68f7212d273ad118225a252fc8cbfb4/odc_geo-0.4.10.tar.gz", hash = "sha256:5670a797c4243e9379b20905ea37ff23ad287e7fa37c672dc53546923daf6d52", size = 192809, upload-time = "2025-03-03T04:12:24.077Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/99/e2/311fb383d9534eef7bfbe858fad931b6e3dbe85843c50592f50063c3bc83/odc_geo-0.4.10-py3-none-any.whl", hash = "sha256:ab5f26f56883a11286a9583c04d30190e35a2702e8aa72fa3b4b438bea851b19", size = 155067, upload-time = "2025-03-03T04:12:22.114Z" },
-]
-
-[[package]]
-name = "odc-loader"
-version = "0.5.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "dask", extra = ["array"] },
-    { name = "numpy" },
-    { name = "odc-geo" },
-    { name = "rasterio" },
-    { name = "xarray" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/99/c6/fd9dbf40aaf94bf3c9712a9ffdd0a791599764c3e4b80b5917aaf6280ec8/odc_loader-0.5.1.tar.gz", hash = "sha256:bf3adf53b10248bbab3bb1fcb043995c12e204dbde4f9a751cd3331b1c6a1212", size = 41616, upload-time = "2025-04-03T00:14:03.126Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/04/48/d45d414b8228325051b0a09f68322ef26717eb9b6517579ae395adf2fbfc/odc_loader-0.5.1-py3-none-any.whl", hash = "sha256:fbe505e2f0e8ac4db2542935bdf5f706e6147817d818073a8a98d3226bd6470f", size = 50717, upload-time = "2025-04-03T00:14:01.687Z" },
-]
-
-[[package]]
-name = "odc-stac"
-version = "0.4.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "affine" },
-    { name = "dask", extra = ["array"] },
-    { name = "numpy" },
-    { name = "odc-geo" },
-    { name = "odc-loader" },
-    { name = "pandas" },
-    { name = "pystac" },
-    { name = "rasterio" },
-    { name = "toolz" },
-    { name = "typing-extensions" },
-    { name = "xarray" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/7f/2e/b5f29cd12f8a5b23f499d7da716cb6d0c55f9542d805111a1e6d92347a31/odc_stac-0.4.0.tar.gz", hash = "sha256:3535767940840e8c3ec2e3dda15ac36e30de0e51624dcc82e1052e19a7dab091", size = 114343, upload-time = "2025-05-01T05:20:51.33Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ef/21/05c243c9b563519ae5b7442a73424ad0537c7d312cf8969bdf9d0fa31c00/odc_stac-0.4.0-py3-none-any.whl", hash = "sha256:a76b9d96d7aea53cabcd7ba99b0cf467a6eab6d2ad6a52802af36b5c407c5952", size = 44259, upload-time = "2025-05-01T05:20:49.632Z" },
-]
-
-[[package]]
 name = "packaging"
 version = "25.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2283,22 +2211,6 @@ wheels = [
 ]
 
 [[package]]
-name = "rioxarray"
-version = "0.20.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "pyproj" },
-    { name = "rasterio" },
-    { name = "xarray" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/5c/ad/d9f7a6d197a44a2c8f53174bdea919b7df3c70ef5c14a13702888516609a/rioxarray-0.20.0.tar.gz", hash = "sha256:8bfc7e979edc7e30b4671d638a9be0e5a7d673dab2ea88e2445d3c7745599c02", size = 55038, upload-time = "2025-10-24T18:14:41.924Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d6/e5/4f4fc949e7eb8415a57091767969e1d314dcf06b74b85bbbf29991395af4/rioxarray-0.20.0-py3-none-any.whl", hash = "sha256:197b0638146dfc6093ef52f8bf8afb42757ca16bc2e0d87b6282ce54170c9799", size = 62690, upload-time = "2025-10-24T18:14:40.73Z" },
-]
-
-[[package]]
 name = "rpds-py"
 version = "0.28.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2692,18 +2604,4 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/2c/41/aa4bf9664e4cda14c3b39865b12251e8e7d239f4cd0e3cc1b6c2ccde25c1/websocket_client-1.9.0.tar.gz", hash = "sha256:9e813624b6eb619999a97dc7958469217c3176312b3a16a4bd1bc7e08a46ec98", size = 70576, upload-time = "2025-10-07T21:16:36.495Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/34/db/b10e48aa8fff7407e67470363eac595018441cf32d5e1001567a7aeba5d2/websocket_client-1.9.0-py3-none-any.whl", hash = "sha256:af248a825037ef591efbf6ed20cc5faa03d3b47b9e5a2230a529eeee1c1fc3ef", size = 82616, upload-time = "2025-10-07T21:16:34.951Z" },
-]
-
-[[package]]
-name = "xarray"
-version = "2025.10.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "pandas" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/7b/ce/f5dd613ddd0b3f839c59e6c2fa20c62469bf671bf4c92a12b09dc0972326/xarray-2025.10.1.tar.gz", hash = "sha256:3c2b5ad7389825bd624ada5ff26b01ac54b1aae72e2fe0d724d81d40a2bf5785", size = 3058736, upload-time = "2025-10-07T20:25:56.708Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c3/78/4d6d68555a92cb97b4c192759c4ab585c5cb23490f64d4ddf12c66a3b051/xarray-2025.10.1-py3-none-any.whl", hash = "sha256:a4e699433b87a7fac340951bc36648645eeef72bdd915ff055ac2fd99865a73d", size = 1365202, upload-time = "2025-10-07T20:25:54.964Z" },
 ]
