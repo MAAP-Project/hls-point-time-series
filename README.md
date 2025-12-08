@@ -11,11 +11,10 @@ The CMR STAC API has imposed rate limits on the HLS collections. This algorithm 
 This DPS algorithm uses [`rustac`](https://github.com/stac-utils/rustac-py) to query an archive of HLS STAC records stored as STAC Geoparquet, then extracts raster values at point locations. The workflow:
 
 1. Queries HLS STAC items for a given MGRS tile and time range
-2. Loads the spectral bands and cloud mask (Fmask) using `odc-stac`
-3. Clips input points to the MGRS tile extent
-4. Extracts raster values at each point location using nearest neighbor sampling
-5. Filters out rows with nodata values
-6. Exports the result as a Parquet file with STAC metadata
+2. Clips input points to the MGRS tile extent
+3. Extracts raster values at each point location using nearest neighbor sampling
+4. Filters out rows with nodata values
+5. Exports the result as a Parquet file with STAC metadata
 
 By using `rustac` + parquet files there is no API between the requester and the actual data!
 
