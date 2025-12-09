@@ -5,8 +5,9 @@ import json
 import logging
 import os
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any, Tuple
 
@@ -16,7 +17,7 @@ import rasterio
 from maap.maap import MAAP
 from pystac import Asset, Catalog, CatalogType, Item
 from rasterio.session import AWSSession
-from rasterio.warp import transform_bounds
+from rasterio.warp import transform
 from rustac import DuckdbClient
 from shapely.geometry import box, mapping
 
@@ -30,7 +31,7 @@ BBox = Tuple[float, float, float, float]
 
 GDAL_CONFIG = {
     "CPL_TMPDIR": "/tmp",
-    "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": "TIF",
+    "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": "TIF,GPKG",
     "GDAL_CACHEMAX": "512",
     "GDAL_INGESTED_BYTES_AT_OPEN": "32768",
     "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
@@ -182,39 +183,34 @@ def get_s3_creds() -> dict[str, Any]:
     }
 
 
-def extract_asset_values(
-    item: Item, points_df: pd.DataFrame, bands: list[str], rasterio_env: dict[str, Any]
-):
+def fetch_single_asset(
+    item_id: str,
+    collection_id: str,
+    band_name: str,
+    asset_href: str,
+    coords_4326: list[tuple[float, float]],
+    rasterio_env: dict[str, Any],
+) -> tuple[str, str, list[float | int | None]]:
     """
-    Directly samples points from S3 COGs without loading grids.
-    points_df: DataFrame with 'x', 'y' columns in the same CRS as the items.
+    Fetch values from a single asset for given coordinates.
+    Reprojects coordinates from EPSG:4326 to match the raster's CRS.
+    Returns (item_id, band_name, values).
     """
+    try:
+        with rasterio.Env(**rasterio_env):
+            with rasterio.open(asset_href) as src:
+                raster_crs = src.crs.to_string()
+                xs_4326, ys_4326 = zip(*coords_4326)
+                xs_proj, ys_proj = transform("EPSG:4326", raster_crs, xs_4326, ys_4326)
+                coords_proj = list(zip(xs_proj, ys_proj))
 
-    coords = list(zip(points_df.geometry.x, points_df.geometry.y))
+                values = list(src.sample(coords_proj))
 
-    def fetch_band(band_name: str):
-        asset_key = BAND_MAPPING[item.collection_id][band_name]
-        asset_href = item.assets[asset_key].href
-        logger.info(f"opening {asset_href}")
-        try:
-            with rasterio.Env(**rasterio_env):
-                with rasterio.open(asset_href) as src:
-                    values = list(src.sample(coords))
-                    return band_name, [v[0] for v in values]
+                return item_id, band_name, [v[0] for v in values]
 
-        except Exception as e:
-            logger.warning(f"Failed to read {band_name} for {item.id}: {e}")
-            return band_name, [None] * len(coords)
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        band_data = list(executor.map(fetch_band, bands))
-
-    band_dict = dict(band_data)
-    band_dict.update(
-        points_df.reset_index().drop(columns=["geometry"]).to_dict(orient="list")
-    )
-
-    return pd.DataFrame(band_dict).assign(time=item.datetime, item_id=item.id)
+    except Exception as e:
+        logger.warning(f"Failed to read {band_name} for {item_id}: {e}")
+        return item_id, band_name, [None] * len(coords_4326)
 
 
 def run(
@@ -241,10 +237,6 @@ def run(
         logger.info(f"no STAC items found for tile id {mgrs_tile}")
         return
 
-    crs = items[0].ext.proj.crs_string
-    if not crs:
-        raise ValueError("could not parse crs_string from STAC items")
-
     item_bboxes = [item.bbox for item in items if item.bbox]
     stack_bbox = (
         min(xmin for (xmin, _, _, _) in item_bboxes),
@@ -254,16 +246,10 @@ def run(
     )
 
     stack_extent = box(*stack_bbox)
-    stack_bbox_proj = transform_bounds("epsg:4326", crs, *stack_bbox)
-    stack_extent_proj = box(*stack_bbox_proj)
 
-    # identify points within the MGRS tile extent
-    pts_clipped = gpd.clip(pts.to_crs(crs), mask=stack_extent_proj)
+    # identify points within the MGRS tile extent (in EPSG:4326)
+    pts_clipped = gpd.clip(pts.to_crs("EPSG:4326"), mask=stack_extent)
     logger.info(f"extracting values for {pts_clipped.shape[0]} points")
-
-    # get projected coordinates
-    pts_clipped["x"] = pts_clipped.geometry.x
-    pts_clipped["y"] = pts_clipped.geometry.y
 
     rasterio_env = {}
     cred_time = None
@@ -276,46 +262,94 @@ def run(
                 if asset.href.startswith(URL_PREFIX):
                     asset.href = asset.href.replace(URL_PREFIX, "s3://")
 
-    # process time dimension in batches with retry logic
-    dfs = []
-    max_retries = 3
-    retry_delay = 5  # seconds
+    # build all tasks upfront: (item, band, asset_href) tuples
+    # keep coordinates in EPSG:4326 - they'll be reprojected per-raster
+    coords_4326 = list(zip(pts_clipped.geometry.x, pts_clipped.geometry.y))
+    tasks = []
+    item_metadata = {}  # store item metadata for later reconstruction
 
     for item in items:
+        item_metadata[item.id] = {
+            "datetime": item.datetime,
+            "collection_id": item.collection_id,
+        }
+        for band_name in bands:
+            asset_key = BAND_MAPPING[item.collection_id][band_name]
+            asset_href = item.assets[asset_key].href
+            tasks.append((item.id, item.collection_id, band_name, asset_href))
+
+    logger.info(f"queued {len(tasks)} asset read tasks across {len(items)} items")
+
+    # process all tasks in parallel with retry logic
+    max_retries = 3
+    retry_delay = 5  # seconds
+    max_workers = 16  # increase parallelism across all items
+
+    def fetch_with_retry(
+        task_info: tuple[str, str, str, str],
+    ) -> tuple[str, str, list[float | int | None]]:
+        item_id, collection_id, band_name, asset_href = task_info
+
+        # check if credentials need refresh
         if cred_time:
             elapsed = time.time() - cred_time
             if elapsed > CREDENTIAL_REFRESH_SECONDS:
-                logger.info("refreshing S3 credentials")
+                logger.info("refreshing S3 credentials in worker")
                 s3_creds = get_s3_creds()
-                rasterio_env["session"] = AWSSession(**s3_creds)
-                cred_time = time.time()
+                worker_env = rasterio_env.copy()
+                worker_env["session"] = AWSSession(**s3_creds)
+            else:
+                worker_env = rasterio_env
+        else:
+            worker_env = rasterio_env
 
         for attempt in range(max_retries):
             try:
-                df = extract_asset_values(
-                    item=item,
-                    points_df=pts_clipped,
-                    bands=bands,
-                    rasterio_env=rasterio_env,
+                return fetch_single_asset(
+                    item_id,
+                    collection_id,
+                    band_name,
+                    asset_href,
+                    coords_4326,
+                    worker_env,
                 )
-                # append valid rows to batch list
-                # TODO: check for valid values
-                dfs.append(df)
-                break
-
             except Exception as e:
                 if attempt < max_retries - 1:
-                    wait_time = retry_delay * (2**attempt)  # exponential backoff
+                    wait_time = retry_delay * (2**attempt)
                     logger.warning(
-                        f"Item {item.id} attempt {attempt + 1}/{max_retries} failed with error: {e}. "
+                        f"Task {item_id}/{band_name} attempt {attempt + 1}/{max_retries} failed: {e}. "
                         f"Retrying in {wait_time} seconds..."
                     )
                     time.sleep(wait_time)
                 else:
                     logger.error(
-                        f"All {max_retries} attempts failed for item {item.id}. Last error: {e}"
+                        f"All {max_retries} attempts failed for {item_id}/{band_name}. Last error: {e}"
                     )
-                    raise
+                    return item_id, band_name, [None] * len(coords_4326)
+
+    # execute all tasks in parallel
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = list(executor.map(fetch_with_retry, tasks))
+
+    # group results by item_id and reconstruct dataframes
+    logger.info("grouping results by item")
+    results_by_item = defaultdict(dict)
+
+    for item_id, band_name, values in results:
+        results_by_item[item_id][band_name] = values
+
+    # build dataframes for each item
+    dfs = []
+    for item_id, band_dict in results_by_item.items():
+        band_dict_with_coords = band_dict.copy()
+        band_dict_with_coords.update(
+            pts_clipped.reset_index().drop(columns=["geometry"]).to_dict(orient="list")
+        )
+        df = pd.DataFrame(band_dict_with_coords).assign(
+            time=item_metadata[item_id]["datetime"],
+            item_id=item_id,
+        )
+        dfs.append(df)
 
     # combine all batches
     logger.info("combining all batches into final dataframe")
@@ -347,15 +381,12 @@ def run(
         },
         assets={
             "parquet": Asset(
-                href=output_parquet,
+                href=output_parquet.replace(f"{output_dir}/", ""),
                 title="HLS time series point sample",
                 description="HLS time series point sample",
+                extra_fields={"created": datetime.now(tz=UTC).isoformat()},
             )
         },
-    )
-    item.ext.add("proj")
-    item.ext.proj.apply(
-        code=crs, bbox=list(stack_bbox_proj), geometry=mapping(stack_extent_proj)
     )
 
     item.set_self_href(f"{output_dir}/item.json")
