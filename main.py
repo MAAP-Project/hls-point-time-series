@@ -17,7 +17,7 @@ import rasterio
 from maap.maap import MAAP
 from pystac import Asset, Catalog, CatalogType, Item
 from rasterio.session import AWSSession
-from rasterio.warp import transform_bounds
+from rasterio.warp import transform
 from rustac import DuckdbClient
 from shapely.geometry import box, mapping
 
@@ -188,21 +188,29 @@ def fetch_single_asset(
     collection_id: str,
     band_name: str,
     asset_href: str,
-    coords: list[tuple[float, float]],
+    coords_4326: list[tuple[float, float]],
     rasterio_env: dict[str, Any],
 ) -> tuple[str, str, list[float | int | None]]:
     """
     Fetch values from a single asset for given coordinates.
+    Reprojects coordinates from EPSG:4326 to match the raster's CRS.
     Returns (item_id, band_name, values).
     """
     try:
         with rasterio.Env(**rasterio_env):
             with rasterio.open(asset_href) as src:
-                values = list(src.sample(coords))
+                raster_crs = src.crs.to_string()
+                xs_4326, ys_4326 = zip(*coords_4326)
+                xs_proj, ys_proj = transform("EPSG:4326", raster_crs, xs_4326, ys_4326)
+                coords_proj = list(zip(xs_proj, ys_proj))
+
+                values = list(src.sample(coords_proj))
+
                 return item_id, band_name, [v[0] for v in values]
+
     except Exception as e:
         logger.warning(f"Failed to read {band_name} for {item_id}: {e}")
-        return item_id, band_name, [None] * len(coords)
+        return item_id, band_name, [None] * len(coords_4326)
 
 
 def run(
@@ -229,10 +237,6 @@ def run(
         logger.info(f"no STAC items found for tile id {mgrs_tile}")
         return
 
-    crs = items[0].ext.proj.crs_string
-    if not crs:
-        raise ValueError("could not parse crs_string from STAC items")
-
     item_bboxes = [item.bbox for item in items if item.bbox]
     stack_bbox = (
         min(xmin for (xmin, _, _, _) in item_bboxes),
@@ -242,16 +246,10 @@ def run(
     )
 
     stack_extent = box(*stack_bbox)
-    stack_bbox_proj = transform_bounds("epsg:4326", crs, *stack_bbox)
-    stack_extent_proj = box(*stack_bbox_proj)
 
-    # identify points within the MGRS tile extent
-    pts_clipped = gpd.clip(pts.to_crs(crs), mask=stack_extent_proj)
+    # identify points within the MGRS tile extent (in EPSG:4326)
+    pts_clipped = gpd.clip(pts.to_crs("EPSG:4326"), mask=stack_extent)
     logger.info(f"extracting values for {pts_clipped.shape[0]} points")
-
-    # get projected coordinates
-    pts_clipped["x"] = pts_clipped.geometry.x
-    pts_clipped["y"] = pts_clipped.geometry.y
 
     rasterio_env = {}
     cred_time = None
@@ -265,7 +263,8 @@ def run(
                     asset.href = asset.href.replace(URL_PREFIX, "s3://")
 
     # build all tasks upfront: (item, band, asset_href) tuples
-    coords = list(zip(pts_clipped.geometry.x, pts_clipped.geometry.y))
+    # keep coordinates in EPSG:4326 - they'll be reprojected per-raster
+    coords_4326 = list(zip(pts_clipped.geometry.x, pts_clipped.geometry.y))
     tasks = []
     item_metadata = {}  # store item metadata for later reconstruction
 
@@ -307,7 +306,12 @@ def run(
         for attempt in range(max_retries):
             try:
                 return fetch_single_asset(
-                    item_id, collection_id, band_name, asset_href, coords, worker_env
+                    item_id,
+                    collection_id,
+                    band_name,
+                    asset_href,
+                    coords_4326,
+                    worker_env,
                 )
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -321,7 +325,7 @@ def run(
                     logger.error(
                         f"All {max_retries} attempts failed for {item_id}/{band_name}. Last error: {e}"
                     )
-                    return item_id, band_name, [None] * len(coords)
+                    return item_id, band_name, [None] * len(coords_4326)
 
     # execute all tasks in parallel
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -383,10 +387,6 @@ def run(
                 extra_fields={"created": datetime.now(tz=UTC).isoformat()},
             )
         },
-    )
-    item.ext.add("proj")
-    item.ext.proj.apply(
-        code=crs, bbox=list(stack_bbox_proj), geometry=mapping(stack_extent_proj)
     )
 
     item.set_self_href(f"{output_dir}/item.json")
