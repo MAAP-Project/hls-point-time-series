@@ -7,7 +7,7 @@ import os
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any, Tuple
 
@@ -377,9 +377,10 @@ def run(
         },
         assets={
             "parquet": Asset(
-                href=output_parquet,
+                href=output_parquet.replace(f"{output_dir}/", ""),
                 title="HLS time series point sample",
                 description="HLS time series point sample",
+                extra_fields={"created": datetime.now(tz=UTC).isoformat()},
             )
         },
     )
