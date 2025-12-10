@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import os
+import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -48,6 +49,52 @@ GDAL_CONFIG = {
 
 # LPCLOUD S3 CREDENTIAL REFRESH
 CREDENTIAL_REFRESH_SECONDS = 50 * 60
+
+
+class CredentialManager:
+    """Thread-safe credential manager for S3 access"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._credentials: dict[str, Any] | None = None
+        self._fetch_time: float | None = None
+        self._session: AWSSession | None = None
+
+    def get_session(self) -> AWSSession:
+        """Get current session, refreshing credentials if needed"""
+        with self._lock:
+            now = time.time()
+
+            # Check if credentials need refresh
+            if (
+                self._credentials is None
+                or self._fetch_time is None
+                or (now - self._fetch_time) > CREDENTIAL_REFRESH_SECONDS
+            ):
+                logger.info("fetching/refreshing S3 credentials")
+                self._credentials = self._fetch_credentials()
+                self._fetch_time = now
+                self._session = AWSSession(**self._credentials)
+
+            return self._session
+
+    @staticmethod
+    def _fetch_credentials() -> dict[str, Any]:
+        """Fetch new credentials from MAAP"""
+        maap = MAAP(maap_host="api.maap-project.org")
+        creds = maap.aws.earthdata_s3_credentials(
+            "https://data.lpdaac.earthdatacloud.nasa.gov/s3credentials"
+        )
+        return {
+            "aws_access_key_id": creds["accessKeyId"],
+            "aws_secret_access_key": creds["secretAccessKey"],
+            "aws_session_token": creds["sessionToken"],
+            "region_name": "us-west-2",
+        }
+
+
+# Global credential manager instance
+_credential_manager = CredentialManager()
 
 HLS_COLLECTIONS = ["HLSL30_2.0", "HLSS30_2.0"]
 HLS_STAC_GEOPARQUET_HREF = "s3://nasa-maap-data-store/file-staging/nasa-map/hls-stac-geoparquet-archive/v2/{collection}/**/*.parquet"
@@ -169,27 +216,12 @@ def get_stac_items(
     return [Item.from_dict(item) for item in items]
 
 
-def get_s3_creds() -> dict[str, Any]:
-    maap = MAAP(maap_host="api.maap-project.org")
-    creds = maap.aws.earthdata_s3_credentials(
-        "https://data.lpdaac.earthdatacloud.nasa.gov/s3credentials"
-    )
-
-    return {
-        "aws_access_key_id": creds["accessKeyId"],
-        "aws_secret_access_key": creds["secretAccessKey"],
-        "aws_session_token": creds["sessionToken"],
-        "region_name": "us-west-2",
-    }
-
-
 def fetch_single_asset(
     item_id: str,
-    collection_id: str,
     band_name: str,
     asset_href: str,
     coords_4326: list[tuple[float, float]],
-    rasterio_env: dict[str, Any],
+    direct_bucket_access: bool = False,
 ) -> tuple[str, str, list[float | int | None]]:
     """
     Fetch values from a single asset for given coordinates.
@@ -197,6 +229,11 @@ def fetch_single_asset(
     Returns (item_id, band_name, values).
     """
     try:
+        # Get session from credential manager if using direct bucket access
+        rasterio_env = {}
+        if direct_bucket_access:
+            rasterio_env["session"] = _credential_manager.get_session()
+
         with rasterio.Env(**rasterio_env):
             with rasterio.open(asset_href) as src:
                 raster_crs = src.crs.to_string()
@@ -251,12 +288,8 @@ def run(
     pts_clipped = gpd.clip(pts.to_crs("EPSG:4326"), mask=stack_extent)
     logger.info(f"extracting values for {pts_clipped.shape[0]} points")
 
-    rasterio_env = {}
-    cred_time = None
+    # Convert URLs to S3 paths if using direct bucket access
     if direct_bucket_access:
-        cred_time = time.time()
-        s3_creds = get_s3_creds()
-        rasterio_env["session"] = AWSSession(**s3_creds)
         for item in items:
             for asset in item.assets.values():
                 if asset.href.startswith(URL_PREFIX):
@@ -276,7 +309,7 @@ def run(
         for band_name in bands:
             asset_key = BAND_MAPPING[item.collection_id][band_name]
             asset_href = item.assets[asset_key].href
-            tasks.append((item.id, item.collection_id, band_name, asset_href))
+            tasks.append((item.id, band_name, asset_href))
 
     logger.info(f"queued {len(tasks)} asset read tasks across {len(items)} items")
 
@@ -286,32 +319,18 @@ def run(
     max_workers = 16  # increase parallelism across all items
 
     def fetch_with_retry(
-        task_info: tuple[str, str, str, str],
+        task_info: tuple[str, str, str],
     ) -> tuple[str, str, list[float | int | None]]:
-        item_id, collection_id, band_name, asset_href = task_info
-
-        # check if credentials need refresh
-        if cred_time:
-            elapsed = time.time() - cred_time
-            if elapsed > CREDENTIAL_REFRESH_SECONDS:
-                logger.info("refreshing S3 credentials in worker")
-                s3_creds = get_s3_creds()
-                worker_env = rasterio_env.copy()
-                worker_env["session"] = AWSSession(**s3_creds)
-            else:
-                worker_env = rasterio_env
-        else:
-            worker_env = rasterio_env
+        item_id, band_name, asset_href = task_info
 
         for attempt in range(max_retries):
             try:
                 return fetch_single_asset(
                     item_id,
-                    collection_id,
                     band_name,
                     asset_href,
                     coords_4326,
-                    worker_env,
+                    direct_bucket_access,
                 )
             except Exception as e:
                 if attempt < max_retries - 1:
