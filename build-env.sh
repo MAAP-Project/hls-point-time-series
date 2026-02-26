@@ -17,6 +17,7 @@ basedir=$( cd "$(dirname "$0")" ; pwd -P )
 
 # install dependencies
 UV_PROJECT=$basedir uv sync --no-dev
+UV_PROJECT=$basedir uv run python -c "from rustac import DuckdbClient; client = DuckdbClient(install_extensions=True, extension_directory='$HOME/duckdb-extensions');"
 
 # unset PROJ env vars
 unset PROJ_LIB
